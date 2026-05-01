@@ -99,8 +99,9 @@
     tbody tr:hover { background: #f0f9ff; }
     tbody td { padding: 7px 12px; border-bottom: 1px solid #f1f5f9; }
     .badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 99px; font-size: .74rem; font-weight: 600; }
-    .badge-ok  { background: #dcfce7; color: #15803d; }
-    .badge-err { background: #fee2e2; color: #b91c1c; }
+    .badge-ok   { background: #dcfce7; color: #15803d; }
+    .badge-err  { background: #fee2e2; color: #b91c1c; }
+    .badge-warn { background: #fef3c7; color: #92400e; }
     .slow-row { background: #fff7ed !important; }
 
     /* Results stats */
@@ -234,8 +235,10 @@
   <div class="card" id="prog-card" hidden>
     <h2>📡 בדיקה בהתקדמות</h2>
     <div id="nocors-warn" class="warn-box" hidden>
-      ⚠️ <strong>שים לב:</strong> השרת אינו מאפשר CORS — הדפדפן אינו יכול לקרוא את קוד ה-HTTP (404, 403, 500...).
-      גישה לכתובת שגויה תוצג כ<strong>הצלחה</strong> כל עוד השרת מגיב. לתוצאות מדויקות יש להפעיל CORS בשרת.
+      ⚠️ <strong>שים לב: השרת אינו מאפשר CORS.</strong>
+      הדפדפן מסרב לחשוף את קוד ה-HTTP (200/404/403...) עבור כתובות מדומיין אחר — זוהי מגבלת אבטחה של הדפדפן.<br>
+      <strong>תוצאות מסומנות "⚠️ שרת מגיב" (צהוב) — פירושן שהשרת ענה, אך הכלי אינו יכול לדעת אם הקובץ אכן קיים.</strong><br>
+      <span style="font-size:.82rem">כדי לקבל תוצאות מדויקות, יש להוסיף לשרת את הכותרת: <code style="background:#fde68a;padding:1px 4px;border-radius:3px">Access-Control-Allow-Origin: *</code></span>
     </div>
     <div class="prog-header">
       <span id="prog-label">מכין...</span>
@@ -553,13 +556,15 @@ function addRow(r) {
   const tr = document.createElement('tr');
   if (isSlow) tr.classList.add('slow-row');
   const statusTag = r.status !== null ? ` <span style="font-size:.68rem;opacity:.8">(${r.status})</span>` : '';
-  const badge = r.success
-    ? `<span class="badge badge-ok">✓ הצלחה${statusTag}</span>`
-    : `<span class="badge badge-err">✗ כישלון${statusTag}</span>`;
+  const badge = (r.noCors && r.success)
+    ? `<span class="badge badge-warn" title="השרת ענה אך לא ניתן לאמת אם הקובץ קיים — אין CORS">⚠️ שרת מגיב</span>`
+    : r.success
+      ? `<span class="badge badge-ok">✓ הצלחה${statusTag}</span>`
+      : `<span class="badge badge-err">✗ כישלון${statusTag}</span>`;
   const errDetail = !r.success && r.error
     ? `<br><span style="font-size:.68rem;color:var(--muted);word-break:break-all" title="${r.error}">${r.error.length > 35 ? r.error.slice(0,35) + '…' : r.error}</span>`
     : '';
-  const noCorsTag = r.noCors
+  const noCorsTag = (r.noCors && !r.success)
     ? `<br><span style="font-size:.65rem;color:var(--warning)" title="אין CORS — קוד HTTP לא זמין">⚠️ ללא CORS</span>`
     : '';
 
