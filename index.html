@@ -129,6 +129,10 @@
     .mode-title { font-size: .9rem; font-weight: 700; color: var(--text); }
     .mode-desc  { font-size: .75rem; color: var(--muted); margin-top: 2px; }
 
+    .dl-check-label { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: .88rem; font-weight: 600; color: var(--text); }
+    .dl-check-label input { width: 16px; height: 16px; accent-color: var(--primary); cursor: pointer; }
+    .dl-note { font-size: .75rem; color: var(--muted); font-weight: 400; }
+
     .error-box { background: #fee2e2; border: 1px solid #fca5a5; border-radius: 8px; padding: 12px 16px; color: #b91c1c; font-size: .9rem; }
     .info-box  { background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 12px 16px; color: #1d4ed8; font-size: .84rem; margin-top: 12px; }
 
@@ -204,6 +208,13 @@
           </label>
         </div>
       </div>
+      <div class="form-group full">
+        <label class="dl-check-label">
+          <input type="checkbox" id="do-download" checked onchange="updateHint()" />
+          <span>מדוד מהירות הורדה בכל דגימה</span>
+          <span class="dl-note">(מוריד עד 2MB מהקובץ · דורש CORS בשרת)</span>
+        </label>
+      </div>
     </div>
 
     <div class="form-actions">
@@ -238,7 +249,7 @@
     <div class="tbl-wrap">
       <table>
         <thead>
-          <tr><th>#</th><th>תוצאה</th><th>זמן גישה</th><th>ממוצע עד כה</th><th>שעה</th><th>הערה</th></tr>
+          <tr><th>#</th><th>תוצאה</th><th>זמן גישה</th><th>מהירות הורדה</th><th>ממוצע עד כה</th><th>שעה</th></tr>
         </thead>
         <tbody id="live-tbody"></tbody>
       </table>
@@ -262,6 +273,10 @@
     <div class="charts-grid">
       <div class="chart-box"><h3>זמני גישה לאורך הבדיקה</h3><canvas id="chart-line"></canvas></div>
       <div class="chart-box"><h3>התפלגות זמני גישה</h3><canvas id="chart-hist"></canvas></div>
+    </div>
+    <div class="charts-grid" id="dl-charts" hidden>
+      <div class="chart-box"><h3>מהירות הורדה לאורך הבדיקה</h3><canvas id="chart-dl-line"></canvas></div>
+      <div class="chart-box"><h3>התפלגות מהירויות הורדה</h3><canvas id="chart-dl-hist"></canvas></div>
     </div>
 
     <div style="margin-top:22px;text-align:center">
@@ -307,7 +322,19 @@ function stdev(arr) {
 }
 
 // ── Interval hint ─────────────────────────────────────────────────────────
-function isRandom() { return $('mode-random').checked; }
+function isRandom()    { return $('mode-random').checked; }
+function doDownload()  { return $('do-download').checked; }
+
+function fmtSpeed(bps) {
+  if (bps >= 1024 * 1024) return (bps / 1024 / 1024).toFixed(2) + ' MB/s';
+  if (bps >= 1024)        return (bps / 1024).toFixed(1) + ' KB/s';
+  return bps.toFixed(0) + ' B/s';
+}
+function fmtBytes(b) {
+  if (b >= 1024 * 1024) return (b / 1024 / 1024).toFixed(2) + ' MB';
+  if (b >= 1024)        return (b / 1024).toFixed(1) + ' KB';
+  return b + ' B';
+}
 
 function updateHint() {
   const a = parseInt($('attempts').value) || 0;
@@ -321,6 +348,37 @@ function updateHint() {
 updateHint();
 
 // ── Random intervals generator ────────────────────────────────────────────
+// ── Download speed probe ──────────────────────────────────────────────────
+async function probeDownload(url, timeoutSec) {
+  const MAX = 2 * 1024 * 1024; // 2 MB cap
+  const ctrl = new AbortController();
+  const tid  = setTimeout(() => ctrl.abort(), timeoutSec * 1000);
+  const bust = url + (url.includes('?') ? '&' : '?') + '_dl=' + Date.now();
+  const t0   = performance.now();
+  try {
+    const resp = await fetch(bust, {
+      method: 'GET', mode: 'cors', cache: 'no-store', signal: ctrl.signal,
+      headers: { 'Range': `bytes=0-${MAX - 1}` },
+    });
+    const reader = resp.body.getReader();
+    let bytes = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.length;
+      if (bytes >= MAX) { reader.cancel(); break; }
+    }
+    clearTimeout(tid);
+    const elapsed = (performance.now() - t0) / 1000;
+    return { ok: true, bytes, elapsed, speedBps: bytes / elapsed };
+  } catch (e) {
+    clearTimeout(tid);
+    const elapsed = (performance.now() - t0) / 1000;
+    const isCors  = e.message === 'Failed to fetch' || e.name === 'TypeError';
+    return { ok: false, elapsed, error: e.name === 'AbortError' ? 'Timeout' : (isCors ? 'CORS' : e.message) };
+  }
+}
+
 function randomIntervals(n, totalMs) {
   if (n <= 1) return [];
   // Generate n-1 gaps from exponential distribution → natural Poisson-style spacing
@@ -383,15 +441,18 @@ async function startTest() {
     ? `${attempts} ניסיונות רנדומליים תוך ${fmtDuration(durSec)}`
     : `${attempts} ניסיונות קצובים תוך ${fmtDuration(durSec)}`;
 
+  const measureDl = doDownload();
+
   for (let i = 0; i < attempts; i++) {
     if (!running) break;
 
     const wall = performance.now();
-    const r = await probe(url, timeout);
+    const r    = await probe(url, timeout);
     r.attempt   = i + 1;
     r.timestamp = Date.now();
-    results.push(r);
+    r.dl        = measureDl ? await probeDownload(url, timeout) : null;
 
+    results.push(r);
     addRow(r);
     updatePills();
 
@@ -437,17 +498,25 @@ function addRow(r) {
   const badge = r.success
     ? '<span class="badge badge-ok">✓ הצלחה</span>'
     : '<span class="badge badge-err">✗ כישלון</span>';
-  const note = r.success
-    ? (isSlow ? '⚠️ איטי' : '')
-    : (r.error || '').substring(0, 55);
+
+  let dlCell = '—';
+  if (r.dl) {
+    if (r.dl.ok) {
+      dlCell = `<span style="color:#16a34a;font-weight:700">${fmtSpeed(r.dl.speedBps)}</span>`
+             + `<br><span style="font-size:.71rem;color:var(--muted)">${fmtBytes(r.dl.bytes)}</span>`;
+    } else {
+      const clr = r.dl.error === 'CORS' ? 'var(--warning)' : 'var(--danger)';
+      dlCell = `<span style="font-size:.75rem;color:${clr}" title="${r.dl.error}">${r.dl.error}</span>`;
+    }
+  }
 
   tr.innerHTML = `
     <td>${r.attempt}</td>
-    <td>${badge}</td>
+    <td>${badge}${isSlow ? ' <span title="איטי מהממוצע פי 2" style="font-size:.7rem">⚠️</span>' : ''}</td>
     <td><strong>${fmtMs(r.elapsed)}</strong></td>
+    <td>${dlCell}</td>
     <td>${avg ? fmtMs(avg) : '—'}</td>
     <td>${fmtTime(r.timestamp)}</td>
-    <td style="font-size:.78rem;color:var(--danger)">${note}</td>
   `;
   $('live-tbody').prepend(tr);
 }
@@ -481,15 +550,25 @@ function showResults() {
   const mx     = times.length ? Math.max(...times) : 0;
   const sd     = stdev(times);
 
+  // Download speed stats
+  const dlOk    = ok.filter(r => r.dl && r.dl.ok);
+  const dlSpeeds = dlOk.map(r => r.dl.speedBps);
+  const dlAvg   = dlSpeeds.length ? mean(dlSpeeds)         : null;
+  const dlMax   = dlSpeeds.length ? Math.max(...dlSpeeds)  : null;
+
   const cards = [
-    { val: results.length,     lbl: 'סה"כ ניסיונות', cls: 'c-blue'   },
-    { val: ok.length,          lbl: 'הצלחות',         cls: 'c-green'  },
-    { val: results.length - ok.length, lbl: 'כישלונות', cls: 'c-red'  },
-    { val: fmtMs(avg),         lbl: 'ממוצע',          cls: 'c-blue'   },
-    { val: fmtMs(med),         lbl: 'חציון',          cls: 'c-purple' },
-    { val: fmtMs(mn),          lbl: 'מינימום',        cls: 'c-green'  },
-    { val: fmtMs(mx),          lbl: 'מקסימום',        cls: 'c-red'    },
-    { val: fmtMs(sd),          lbl: 'סטיית תקן',      cls: 'c-orange' },
+    { val: results.length,                lbl: 'סה"כ ניסיונות',    cls: 'c-blue'   },
+    { val: ok.length,                     lbl: 'הצלחות',            cls: 'c-green'  },
+    { val: results.length - ok.length,    lbl: 'כישלונות',          cls: 'c-red'    },
+    { val: fmtMs(avg),                    lbl: 'ממוצע (latency)',   cls: 'c-blue'   },
+    { val: fmtMs(med),                    lbl: 'חציון',             cls: 'c-purple' },
+    { val: fmtMs(mn),                     lbl: 'מינימום',           cls: 'c-green'  },
+    { val: fmtMs(mx),                     lbl: 'מקסימום',           cls: 'c-red'    },
+    { val: fmtMs(sd),                     lbl: 'סטיית תקן',         cls: 'c-orange' },
+    ...(dlAvg !== null ? [
+      { val: fmtSpeed(dlAvg),             lbl: 'מהירות הורדה ממוצע', cls: 'c-green' },
+      { val: fmtSpeed(dlMax),             lbl: 'מהירות הורדה מקסימום', cls: 'c-blue' },
+    ] : []),
   ];
   $('stats-grid').innerHTML = cards.map(c =>
     `<div class="stat-card"><div class="val ${c.cls}">${c.val}</div><div class="lbl">${c.lbl}</div></div>`
@@ -504,13 +583,17 @@ function showResults() {
       <td>${fmtTime(r.timestamp)}</td>
     </tr>`).join('');
 
-  renderCharts(ok, avg, med);
+  renderCharts(ok, avg, med, dlOk);
 }
 
 // ── Charts ────────────────────────────────────────────────────────────────
-function renderCharts(ok, avg, med) {
-  if (chartLine) { chartLine.destroy(); chartLine = null; }
-  if (chartHist) { chartHist.destroy(); chartHist = null; }
+let chartDlLine = null, chartDlHist = null;
+
+function renderCharts(ok, avg, med, dlOk) {
+  if (chartLine)   { chartLine.destroy();   chartLine   = null; }
+  if (chartHist)   { chartHist.destroy();   chartHist   = null; }
+  if (chartDlLine) { chartDlLine.destroy(); chartDlLine = null; }
+  if (chartDlHist) { chartDlHist.destroy(); chartDlHist = null; }
   if (!ok.length) return;
 
   const labels  = ok.map(r => fmtTime(r.timestamp));
@@ -574,6 +657,55 @@ function renderCharts(ok, avg, med) {
       },
     },
   });
+
+  // ── Download speed charts ────────────────────────────────────────────────
+  if (dlOk && dlOk.length) {
+    $('dl-charts').hidden = false;
+    const dlAvg    = mean(dlOk.map(r => r.dl.speedBps));
+    const dlLabels = dlOk.map(r => fmtTime(r.timestamp));
+    const dlMbps   = dlOk.map(r => +(r.dl.speedBps / 1024 / 1024).toFixed(3));
+    const dlAvgMbps = dlAvg / 1024 / 1024;
+
+    chartDlLine = new Chart($('chart-dl-line'), {
+      type: 'line',
+      data: { labels: dlLabels, datasets: [
+        { label: 'מהירות הורדה (MB/s)', data: dlMbps,
+          borderColor: '#16a34a', backgroundColor: 'rgba(22,163,74,.07)',
+          borderWidth: 1.5, fill: true, tension: 0.3,
+          pointRadius: dlMbps.length > 80 ? 0 : 3, pointHoverRadius: 5 },
+        { label: `ממוצע ${fmtSpeed(dlAvg)}`,
+          data: Array(dlLabels.length).fill(+dlAvgMbps.toFixed(3)),
+          borderColor: '#dc2626', borderWidth: 1.5, borderDash: [6,4],
+          pointRadius: 0, fill: false },
+      ]},
+      options: { responsive: true,
+        interaction: { mode: 'index', intersect: false },
+        plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } },
+        scales: {
+          x: { ticks: { maxTicksLimit: 8, font: { size: 10 } } },
+          y: { title: { display: true, text: 'MB/s' }, beginAtZero: true },
+        },
+      },
+    });
+
+    const dlBins = buildHistogram(dlMbps, 20);
+    chartDlHist = new Chart($('chart-dl-hist'), {
+      type: 'bar',
+      data: { labels: dlBins.labels, datasets: [{
+        label: 'כמות', data: dlBins.counts,
+        backgroundColor: 'rgba(22,163,74,.7)', borderColor: '#16a34a',
+        borderWidth: 1, borderRadius: 3,
+      }]},
+      options: { responsive: true, plugins: { legend: { display: false } },
+        scales: {
+          x: { title: { display: true, text: 'MB/s' }, ticks: { font: { size: 10 } } },
+          y: { title: { display: true, text: 'כמות' }, beginAtZero: true, ticks: { precision: 0 } },
+        },
+      },
+    });
+  } else {
+    $('dl-charts').hidden = true;
+  }
 }
 
 function buildHistogram(values, numBins) {
@@ -594,10 +726,13 @@ function buildHistogram(values, numBins) {
 function resetUI() {
   running = false;
   results = [];
-  $('prog-card').hidden = true;
-  $('res-card').hidden  = true;
-  $('btn-start').hidden = false;
-  $('btn-stop').hidden  = true;
+  $('prog-card').hidden  = true;
+  $('res-card').hidden   = true;
+  $('dl-charts').hidden  = true;
+  $('btn-start').hidden  = false;
+  $('btn-stop').hidden   = true;
+  if (chartDlLine) { chartDlLine.destroy(); chartDlLine = null; }
+  if (chartDlHist) { chartDlHist.destroy(); chartDlHist = null; }
   clearErr();
 }
 function showErr(msg) { $('err-box').textContent = msg; $('err-box').hidden = false; }
