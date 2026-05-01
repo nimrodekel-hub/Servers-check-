@@ -545,7 +545,7 @@ function addRow(r) {
   $('prog-bar').style.width = pct + '%';
   $('prog-pct').textContent = pct + '%';
 
-  const okTimes = results.filter(x => x.success).map(x => x.elapsed);
+  const okTimes = results.filter(x => x !== r && x.success).map(x => x.elapsed);
   const avg     = okTimes.length ? mean(okTimes) : null;
   const isSlow  = avg && r.success && r.elapsed > avg * 2;
 
