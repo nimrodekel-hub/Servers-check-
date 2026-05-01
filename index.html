@@ -225,14 +225,6 @@
       <span id="hint" style="font-size:.82rem;color:var(--muted)"></span>
     </div>
 
-    <div id="proxy-status-box" style="margin-top:12px;padding:10px 14px;border-radius:7px;font-size:.83rem;border:1px solid var(--border);background:#f8fafc">
-      <span id="proxy-status">⏳ בודק פרוקסי מקומי...</span>
-      <span id="proxy-help" hidden style="color:var(--muted)"> —
-        להרצת פרוקסי: <code style="background:#e2e8f0;padding:1px 5px;border-radius:3px">python proxy.py</code>
-        (קובץ <code>proxy.py</code> בתיקיית הכלי)
-      </span>
-    </div>
-
     <div class="info-box">
       💡 הכנס את ה-URL של הקובץ בשרת (חייב להתחיל ב-<code>http://</code> או <code>https://</code>).
       הדפדפן ישלח בקשה לשרת וימדוד את זמן התגובה בכל ניסיון.
@@ -242,12 +234,6 @@
   <!-- Live progress -->
   <div class="card" id="prog-card" hidden>
     <h2>📡 בדיקה בהתקדמות</h2>
-    <div id="nocors-warn" class="warn-box" hidden>
-      ⚠️ <strong>שים לב: השרת אינו מאפשר CORS.</strong>
-      הדפדפן מסרב לחשוף את קוד ה-HTTP (200/404/403...) עבור כתובות מדומיין אחר — זוהי מגבלת אבטחה של הדפדפן.<br>
-      <strong>תוצאות מסומנות "⚠️ שרת מגיב" (צהוב) — פירושן שהשרת ענה, אך הכלי אינו יכול לדעת אם הקובץ אכן קיים.</strong><br>
-      <span style="font-size:.82rem">כדי לקבל תוצאות מדויקות, יש להוסיף לשרת את הכותרת: <code style="background:#fde68a;padding:1px 4px;border-radius:3px">Access-Control-Allow-Origin: *</code></span>
-    </div>
     <div class="prog-header">
       <span id="prog-label">מכין...</span>
       <span id="prog-pct">0%</span>
@@ -313,34 +299,6 @@ let running = false;
 let results  = [];
 let totalN   = 0;
 let chartLine = null, chartHist = null;
-
-// ── Local proxy ───────────────────────────────────────────────────────────
-const PROXY_URL = 'http://localhost:7654';
-let proxyOk = false;
-
-async function checkProxy() {
-  try {
-    const r = await fetch(PROXY_URL + '/http://example.com', {
-      signal: AbortSignal.timeout(1200), cache: 'no-store'
-    });
-    proxyOk = r.ok;
-  } catch (_) {
-    proxyOk = false;
-  }
-  const el = $('proxy-status');
-  const help = $('proxy-help');
-  if (proxyOk) {
-    el.textContent = '✓ פרוקסי מקומי פועל — הבדיקות יזהו קבצים שאינם קיימים (404) בדיוק מלא';
-    el.style.color = 'var(--success)';
-    $('proxy-status-box').style.background = '#f0fdf4';
-    $('proxy-status-box').style.borderColor = '#86efac';
-  } else {
-    el.textContent = '⚠️ פרוקסי מקומי לא פועל — לא ניתן לזהות 404 בשרת ללא CORS';
-    el.style.color = 'var(--warning)';
-    help.hidden = false;
-  }
-}
-checkProxy();
 
 // ── Format helpers ────────────────────────────────────────────────────────
 function fmtMs(sec) {
@@ -460,30 +418,10 @@ function randomIntervals(n, totalMs) {
 
 // ── Probe ─────────────────────────────────────────────────────────────────
 async function probe(url, timeoutSec) {
-  const sep = url.includes('?') ? '&' : '?';
-  const t0  = performance.now();
+  const sep  = url.includes('?') ? '&' : '?';
+  const t0   = performance.now();
 
-  // Via local proxy — gets real HTTP status regardless of CORS
-  if (proxyOk) {
-    const ctrl = new AbortController();
-    const tid  = setTimeout(() => ctrl.abort(), timeoutSec * 1000);
-    try {
-      const resp = await fetch(PROXY_URL + '/' + url + sep + '_nc=' + Date.now(),
-        { cache: 'no-store', signal: ctrl.signal });
-      clearTimeout(tid);
-      const elapsed = (performance.now() - t0) / 1000;
-      const data    = await resp.json();
-      const status  = data.status;
-      const success = status >= 200 && status < 300 || status === 206;
-      return { success, elapsed, status, error: success ? null : `HTTP ${status}`, noCors: false };
-    } catch (e) {
-      clearTimeout(tid);
-      return { success: false, elapsed: (performance.now() - t0) / 1000,
-               error: e.name === 'AbortError' ? `Timeout (>${timeoutSec}s)` : e.message, status: null, noCors: false };
-    }
-  }
-
-  // Attempt 1: CORS GET with Range:bytes=0-0 — receives real HTTP status code
+  // Try CORS GET first — gets real HTTP status code when server allows it
   const ctrl = new AbortController();
   const tid  = setTimeout(() => ctrl.abort(), timeoutSec * 1000);
   const bust = url + sep + '_nc=' + Date.now();
@@ -501,10 +439,10 @@ async function probe(url, timeoutSec) {
     clearTimeout(tid);
     if (e.name === 'AbortError')
       return { success: false, elapsed: (performance.now() - t0) / 1000, error: `Timeout (>${timeoutSec}s)`, status: null, noCors: false };
-    // CORS not available on server — fall through
+    // CORS headers not on server — fall through to no-cors
   }
 
-  // Attempt 2: no-cors HEAD — opaque response, cannot read HTTP status
+  // Fallback: no-cors HEAD — server reachable = success, network error = failure
   const ctrl2 = new AbortController();
   const tid2  = setTimeout(() => ctrl2.abort(), timeoutSec * 1000);
   const bust2 = url + sep + '_nc2=' + Date.now();
@@ -515,8 +453,8 @@ async function probe(url, timeoutSec) {
     return { success: true, elapsed: (performance.now() - t1) / 1000, status: null, error: null, noCors: true };
   } catch (e2) {
     clearTimeout(tid2);
-    return { success: false, elapsed: (performance.now() - t1) / 1000,
-             error: e2.name === 'AbortError' ? `Timeout (>${timeoutSec}s)` : e2.message, status: null, noCors: true };
+    const errMsg = e2.name === 'AbortError' ? `Timeout (>${timeoutSec}s)` : 'שרת לא מגיב';
+    return { success: false, elapsed: (performance.now() - t1) / 1000, error: errMsg, status: null, noCors: true };
   }
 }
 
@@ -540,7 +478,6 @@ async function startTest() {
   results  = [];
   running  = true;
 
-  $('nocors-warn').hidden = true;
   $('btn-start').hidden = true;
   $('btn-stop').hidden  = false;
   $('prog-card').hidden = false;
@@ -612,20 +549,12 @@ function addRow(r) {
   const tr = document.createElement('tr');
   if (isSlow) tr.classList.add('slow-row');
   const statusTag = r.status !== null ? ` <span style="font-size:.68rem;opacity:.8">(${r.status})</span>` : '';
-  const badge = (r.noCors && r.success)
-    ? `<span class="badge badge-warn" title="השרת ענה אך לא ניתן לאמת אם הקובץ קיים — אין CORS">⚠️ שרת מגיב</span>`
-    : r.success
-      ? `<span class="badge badge-ok">✓ הצלחה${statusTag}</span>`
-      : `<span class="badge badge-err">✗ כישלון${statusTag}</span>`;
+  const badge = r.success
+    ? `<span class="badge badge-ok">✓ הצלחה${statusTag}</span>`
+    : `<span class="badge badge-err">✗ כישלון${statusTag}</span>`;
   const errDetail = !r.success && r.error
     ? `<br><span style="font-size:.68rem;color:var(--muted);word-break:break-all" title="${r.error}">${r.error.length > 35 ? r.error.slice(0,35) + '…' : r.error}</span>`
     : '';
-  const noCorsTag = (r.noCors && !r.success)
-    ? `<br><span style="font-size:.65rem;color:var(--warning)" title="אין CORS — קוד HTTP לא זמין">⚠️ ללא CORS</span>`
-    : '';
-
-  // Show noCors warning banner on first noCors result
-  if (r.noCors && $('nocors-warn').hidden) $('nocors-warn').hidden = false;
 
   let dlCell = '—';
   if (r.dl) {
@@ -644,7 +573,7 @@ function addRow(r) {
 
   tr.innerHTML = `
     <td>${r.attempt}</td>
-    <td>${badge}${errDetail}${noCorsTag}${isSlow ? ' <span title="איטי מהממוצע פי 2" style="font-size:.7rem">⚠️</span>' : ''}</td>
+    <td>${badge}${errDetail}${isSlow ? ' <span title="איטי מהממוצע פי 2" style="font-size:.7rem">⚠️</span>' : ''}</td>
     <td><strong>${fmtMs(r.elapsed)}</strong></td>
     <td>${dlCell}</td>
     <td>${avg ? fmtMs(avg) : '—'}</td>
@@ -932,7 +861,6 @@ function resetUI() {
   $('res-card').hidden    = true;
   $('dl-charts').hidden   = true;
   $('get-charts').hidden  = true;
-  $('nocors-warn').hidden = true;
   $('btn-start').hidden   = false;
   $('btn-stop').hidden    = true;
   if (chartDlLine)  { chartDlLine.destroy();  chartDlLine  = null; }
