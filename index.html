@@ -212,7 +212,7 @@
         <label class="dl-check-label">
           <input type="checkbox" id="do-download" checked onchange="updateHint()" />
           <span>מדוד מהירות הורדה בכל דגימה</span>
-          <span class="dl-note">(מוריד עד 2MB מהקובץ · דורש CORS בשרת)</span>
+          <span class="dl-note">(מוריד עד 2MB · אם אין CORS בשרת — מוצג זמן GET בלבד)</span>
         </label>
       </div>
     </div>
@@ -351,13 +351,16 @@ updateHint();
 // ── Download speed probe ──────────────────────────────────────────────────
 async function probeDownload(url, timeoutSec) {
   const MAX = 2 * 1024 * 1024; // 2 MB cap
-  const ctrl = new AbortController();
-  const tid  = setTimeout(() => ctrl.abort(), timeoutSec * 1000);
-  const bust = url + (url.includes('?') ? '&' : '?') + '_dl=' + Date.now();
-  const t0   = performance.now();
+  const sep  = url.includes('?') ? '&' : '?';
+
+  // Attempt 1: CORS GET — can read body → exact speed
+  const bust1 = url + sep + '_dl=' + Date.now();
+  const ctrl1 = new AbortController();
+  const tid1  = setTimeout(() => ctrl1.abort(), timeoutSec * 1000);
+  const t0    = performance.now();
   try {
-    const resp = await fetch(bust, {
-      method: 'GET', mode: 'cors', cache: 'no-store', signal: ctrl.signal,
+    const resp = await fetch(bust1, {
+      method: 'GET', mode: 'cors', cache: 'no-store', signal: ctrl1.signal,
       headers: { 'Range': `bytes=0-${MAX - 1}` },
     });
     const reader = resp.body.getReader();
@@ -368,14 +371,34 @@ async function probeDownload(url, timeoutSec) {
       bytes += value.length;
       if (bytes >= MAX) { reader.cancel(); break; }
     }
-    clearTimeout(tid);
+    clearTimeout(tid1);
     const elapsed = (performance.now() - t0) / 1000;
     return { ok: true, bytes, elapsed, speedBps: bytes / elapsed };
   } catch (e) {
-    clearTimeout(tid);
-    const elapsed = (performance.now() - t0) / 1000;
-    const isCors  = e.message === 'Failed to fetch' || e.name === 'TypeError';
-    return { ok: false, elapsed, error: e.name === 'AbortError' ? 'Timeout' : (isCors ? 'CORS' : e.message) };
+    clearTimeout(tid1);
+    if (e.name === 'AbortError') {
+      return { ok: false, elapsed: (performance.now() - t0) / 1000, error: `Timeout (>${timeoutSec}s)` };
+    }
+    // CORS blocked — fall through to no-cors timing
+  }
+
+  // Attempt 2: no-cors GET — browser downloads but response is opaque; measure total time
+  const bust2 = url + sep + '_dl2=' + Date.now();
+  const ctrl2 = new AbortController();
+  const tid2  = setTimeout(() => ctrl2.abort(), timeoutSec * 1000);
+  const t1    = performance.now();
+  try {
+    await fetch(bust2, { method: 'GET', mode: 'no-cors', cache: 'no-store', signal: ctrl2.signal });
+    clearTimeout(tid2);
+    const elapsed = (performance.now() - t1) / 1000;
+    // PerformanceResourceTiming may expose byte count if server sends Timing-Allow-Origin
+    const entry = performance.getEntriesByName(bust2, 'resource').slice(-1)[0];
+    const bytes = entry && entry.encodedBodySize > 0 ? entry.encodedBodySize : null;
+    return { ok: true, bytes, elapsed, speedBps: bytes ? bytes / elapsed : null };
+  } catch (e2) {
+    clearTimeout(tid2);
+    return { ok: false, elapsed: (performance.now() - t1) / 1000,
+             error: e2.name === 'AbortError' ? `Timeout (>${timeoutSec}s)` : e2.message };
   }
 }
 
@@ -401,7 +424,7 @@ async function probe(url, timeoutSec) {
   } catch (e) {
     clearTimeout(tid);
     return { success: false, elapsed: (performance.now() - t0) / 1000,
-             error: e.name === 'AbortError' ? 'Timeout' : e.message };
+             error: e.name === 'AbortError' ? `Timeout (>${timeoutSec}s)` : e.message };
   }
 }
 
@@ -498,21 +521,28 @@ function addRow(r) {
   const badge = r.success
     ? '<span class="badge badge-ok">✓ הצלחה</span>'
     : '<span class="badge badge-err">✗ כישלון</span>';
+  const errDetail = !r.success && r.error
+    ? `<br><span style="font-size:.68rem;color:var(--muted);word-break:break-all" title="${r.error}">${r.error.length > 35 ? r.error.slice(0,35) + '…' : r.error}</span>`
+    : '';
 
   let dlCell = '—';
   if (r.dl) {
     if (r.dl.ok) {
-      dlCell = `<span style="color:#16a34a;font-weight:700">${fmtSpeed(r.dl.speedBps)}</span>`
-             + `<br><span style="font-size:.71rem;color:var(--muted)">${fmtBytes(r.dl.bytes)}</span>`;
+      if (r.dl.speedBps !== null) {
+        dlCell = `<span style="color:#16a34a;font-weight:700">${fmtSpeed(r.dl.speedBps)}</span>`
+               + `<br><span style="font-size:.71rem;color:var(--muted)">${fmtBytes(r.dl.bytes)}</span>`;
+      } else {
+        // no-cors fallback: browser downloaded but byte count unavailable — show total GET time
+        dlCell = `<span style="font-size:.75rem;color:var(--muted)" title="אין CORS — מוצג זמן GET כולל (ללא חישוב מהירות)">⏱ ${fmtMs(r.dl.elapsed)}</span>`;
+      }
     } else {
-      const clr = r.dl.error === 'CORS' ? 'var(--warning)' : 'var(--danger)';
-      dlCell = `<span style="font-size:.75rem;color:${clr}" title="${r.dl.error}">${r.dl.error}</span>`;
+      dlCell = `<span style="font-size:.75rem;color:var(--danger)" title="${r.dl.error}">${r.dl.error}</span>`;
     }
   }
 
   tr.innerHTML = `
     <td>${r.attempt}</td>
-    <td>${badge}${isSlow ? ' <span title="איטי מהממוצע פי 2" style="font-size:.7rem">⚠️</span>' : ''}</td>
+    <td>${badge}${errDetail}${isSlow ? ' <span title="איטי מהממוצע פי 2" style="font-size:.7rem">⚠️</span>' : ''}</td>
     <td><strong>${fmtMs(r.elapsed)}</strong></td>
     <td>${dlCell}</td>
     <td>${avg ? fmtMs(avg) : '—'}</td>
@@ -550,8 +580,8 @@ function showResults() {
   const mx     = times.length ? Math.max(...times) : 0;
   const sd     = stdev(times);
 
-  // Download speed stats
-  const dlOk    = ok.filter(r => r.dl && r.dl.ok);
+  // Download speed stats (only entries where byte count is known)
+  const dlOk    = ok.filter(r => r.dl && r.dl.ok && r.dl.speedBps !== null);
   const dlSpeeds = dlOk.map(r => r.dl.speedBps);
   const dlAvg   = dlSpeeds.length ? mean(dlSpeeds)         : null;
   const dlMax   = dlSpeeds.length ? Math.max(...dlSpeeds)  : null;
