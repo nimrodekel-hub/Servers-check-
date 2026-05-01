@@ -110,6 +110,19 @@
     .chart-box { background: #f8fafc; border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
     .chart-box h3 { font-size: .84rem; font-weight: 700; color: var(--muted); margin-bottom: 12px; }
 
+    /* Mode selector */
+    .mode-row { display: flex; gap: 12px; }
+    .mode-opt {
+      flex: 1; display: flex; align-items: center; gap: 12px;
+      border: 2px solid var(--border); border-radius: 8px; padding: 12px 14px;
+      cursor: pointer; transition: border-color .15s, background .15s;
+    }
+    .mode-opt:has(input:checked) { border-color: var(--primary); background: #eff6ff; }
+    .mode-opt input[type=radio] { display: none; }
+    .mode-icon { font-size: 1.4rem; }
+    .mode-title { font-size: .9rem; font-weight: 700; color: var(--text); }
+    .mode-desc  { font-size: .75rem; color: var(--muted); margin-top: 2px; }
+
     .error-box { background: #fee2e2; border: 1px solid #fca5a5; border-radius: 8px; padding: 12px 16px; color: #b91c1c; font-size: .9rem; }
     .info-box  { background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 12px 16px; color: #1d4ed8; font-size: .84rem; margin-top: 12px; }
 
@@ -119,6 +132,7 @@
       .form-grid { grid-template-columns: 1fr; }
       .charts-grid { grid-template-columns: 1fr; }
       .live-stats { gap: 8px; }
+      .mode-row { flex-direction: column; }
     }
   </style>
 </head>
@@ -159,6 +173,27 @@
             <option value="60" selected>דקות</option>
             <option value="3600">שעות</option>
           </select>
+        </div>
+      </div>
+      <div class="form-group full">
+        <label>סוג מרווח בין בדיקות</label>
+        <div class="mode-row">
+          <label class="mode-opt">
+            <input type="radio" name="mode" id="mode-fixed" value="fixed" checked onchange="updateHint()" />
+            <span class="mode-icon">⏱</span>
+            <div>
+              <div class="mode-title">קצוב</div>
+              <div class="mode-desc">בדיקה בכל X זמן קבוע</div>
+            </div>
+          </label>
+          <label class="mode-opt">
+            <input type="radio" name="mode" id="mode-random" value="random" onchange="updateHint()" />
+            <span class="mode-icon">🎲</span>
+            <div>
+              <div class="mode-title">רנדומלי</div>
+              <div class="mode-desc">מרווחים אקראיים בין הבדיקות</div>
+            </div>
+          </label>
         </div>
       </div>
     </div>
@@ -250,13 +285,25 @@ function stdev(arr) {
   return Math.sqrt(arr.reduce((a,b) => a + (b-m)**2, 0) / (arr.length-1));
 }
 
+function isRandom() { return $('mode-random').checked; }
+
 function updateHint() {
   const a = parseInt($('attempts').value) || 0;
   const d = (parseFloat($('dur-val').value) || 0) * parseFloat($('dur-unit').value);
-  $('hint').textContent = (a > 1 && d > 0) ? `מרווח בין ניסיונות: ${fmtMs(d / (a - 1))}` : '';
+  if (!(a > 1 && d > 0)) { $('hint').textContent = ''; return; }
+  $('hint').textContent = isRandom()
+    ? `מרווחים אקראיים · ממוצע כ-${fmtMs(d / (a - 1))}`
+    : `מרווח קבוע: ${fmtMs(d / (a - 1))}`;
 }
 ['attempts','dur-val','dur-unit'].forEach(id => $(id).addEventListener('input', updateHint));
 updateHint();
+
+function randomIntervals(n, totalMs) {
+  if (n <= 1) return [];
+  const gaps = Array.from({length: n - 1}, () => -Math.log(1 - Math.random()));
+  const sum   = gaps.reduce((a, b) => a + b, 0);
+  return gaps.map(g => (g / sum) * totalMs);
+}
 
 async function probe(url, timeoutSec) {
   const ctrl = new AbortController();
@@ -300,8 +347,14 @@ async function startTest() {
   $('live-tbody').innerHTML = '';
   resetPills();
 
-  const interval = attempts > 1 ? (durSec * 1000) / (attempts - 1) : 0;
-  $('prog-label').textContent = `${attempts} ניסיונות תוך ${fmtDuration(durSec)}`;
+  const random     = isRandom();
+  const totalMs    = durSec * 1000;
+  const fixedGap   = attempts > 1 ? totalMs / (attempts - 1) : 0;
+  const randomGaps = random ? randomIntervals(attempts, totalMs) : null;
+
+  $('prog-label').textContent = random
+    ? `${attempts} ניסיונות רנדומליים תוך ${fmtDuration(durSec)}`
+    : `${attempts} ניסיונות קצובים תוך ${fmtDuration(durSec)}`;
 
   for (let i = 0; i < attempts; i++) {
     if (!running) break;
@@ -313,7 +366,8 @@ async function startTest() {
     addRow(r);
     updatePills();
     if (i < attempts - 1 && running) {
-      const wait = Math.max(0, interval - (performance.now() - wall));
+      const gap  = random ? randomGaps[i] : fixedGap;
+      const wait = Math.max(0, gap - (performance.now() - wall));
       if (wait > 0) await sleep(wait);
     }
   }
@@ -384,14 +438,14 @@ function showResults() {
   const mx    = times.length ? Math.max(...times) : 0;
   const sd    = stdev(times);
   const cards = [
-    { val: results.length,            lbl: 'סה"כ ניסיונות', cls: 'c-blue'   },
-    { val: ok.length,                 lbl: 'הצלחות',         cls: 'c-green'  },
-    { val: results.length-ok.length,  lbl: 'כישלונות',       cls: 'c-red'    },
-    { val: fmtMs(avg),                lbl: 'ממוצע',          cls: 'c-blue'   },
-    { val: fmtMs(med),                lbl: 'חציון',          cls: 'c-purple' },
-    { val: fmtMs(mn),                 lbl: 'מינימום',        cls: 'c-green'  },
-    { val: fmtMs(mx),                 lbl: 'מקסימום',        cls: 'c-red'    },
-    { val: fmtMs(sd),                 lbl: 'סטיית תקן',      cls: 'c-orange' },
+    { val: results.length,           lbl: 'סה"כ ניסיונות', cls: 'c-blue'   },
+    { val: ok.length,                lbl: 'הצלחות',         cls: 'c-green'  },
+    { val: results.length-ok.length, lbl: 'כישלונות',       cls: 'c-red'    },
+    { val: fmtMs(avg),               lbl: 'ממוצע',          cls: 'c-blue'   },
+    { val: fmtMs(med),               lbl: 'חציון',          cls: 'c-purple' },
+    { val: fmtMs(mn),                lbl: 'מינימום',        cls: 'c-green'  },
+    { val: fmtMs(mx),                lbl: 'מקסימום',        cls: 'c-red'    },
+    { val: fmtMs(sd),                lbl: 'סטיית תקן',      cls: 'c-orange' },
   ];
   $('stats-grid').innerHTML = cards.map(c =>
     `<div class="stat-card"><div class="val ${c.cls}">${c.val}</div><div class="lbl">${c.lbl}</div></div>`
