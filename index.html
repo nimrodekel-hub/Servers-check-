@@ -278,6 +278,10 @@
       <div class="chart-box"><h3>מהירות הורדה לאורך הבדיקה</h3><canvas id="chart-dl-line"></canvas></div>
       <div class="chart-box"><h3>התפלגות מהירויות הורדה</h3><canvas id="chart-dl-hist"></canvas></div>
     </div>
+    <div class="charts-grid" id="get-charts" hidden>
+      <div class="chart-box"><h3>זמן GET לאורך הבדיקה</h3><canvas id="chart-get-line"></canvas></div>
+      <div class="chart-box"><h3>התפלגות זמני GET</h3><canvas id="chart-get-hist"></canvas></div>
+    </div>
 
     <div style="margin-top:22px;text-align:center">
       <button class="btn btn-primary" onclick="resetUI()">🔄 בדיקה חדשה</button>
@@ -580,10 +584,20 @@ function showResults() {
   const sd     = stdev(times);
 
   // Download speed stats (only entries where byte count is known)
-  const dlOk    = ok.filter(r => r.dl && r.dl.ok && r.dl.speedBps !== null);
+  const dlOk     = ok.filter(r => r.dl && r.dl.ok && r.dl.speedBps !== null);
   const dlSpeeds = dlOk.map(r => r.dl.speedBps);
-  const dlAvg   = dlSpeeds.length ? mean(dlSpeeds)         : null;
-  const dlMax   = dlSpeeds.length ? Math.max(...dlSpeeds)  : null;
+  const dlAvg    = dlSpeeds.length ? mean(dlSpeeds)        : null;
+  const dlMax    = dlSpeeds.length ? Math.max(...dlSpeeds) : null;
+  const dlMin    = dlSpeeds.length ? Math.min(...dlSpeeds) : null;
+  const dlSd     = stdev(dlSpeeds);
+
+  // Timing-only download samples (no-cors fallback — elapsed only, no byte count)
+  const dlTiming  = ok.filter(r => r.dl && r.dl.ok && r.dl.speedBps === null);
+  const dlTimes   = dlTiming.map(r => r.dl.elapsed);
+  const dlTimeAvg = dlTimes.length ? mean(dlTimes)        : null;
+  const dlTimeMin = dlTimes.length ? Math.min(...dlTimes) : null;
+  const dlTimeMax = dlTimes.length ? Math.max(...dlTimes) : null;
+  const dlTimeSd  = stdev(dlTimes);
 
   const cards = [
     { val: results.length,                lbl: 'סה"כ ניסיונות',    cls: 'c-blue'   },
@@ -595,8 +609,16 @@ function showResults() {
     { val: fmtMs(mx),                     lbl: 'מקסימום',           cls: 'c-red'    },
     { val: fmtMs(sd),                     lbl: 'סטיית תקן',         cls: 'c-orange' },
     ...(dlAvg !== null ? [
-      { val: fmtSpeed(dlAvg),             lbl: 'מהירות הורדה ממוצע', cls: 'c-green' },
-      { val: fmtSpeed(dlMax),             lbl: 'מהירות הורדה מקסימום', cls: 'c-blue' },
+      { val: fmtSpeed(dlAvg),             lbl: 'מהירות הורדה ממוצע',   cls: 'c-green'  },
+      { val: fmtSpeed(dlMin),             lbl: 'מהירות הורדה מינימום',  cls: 'c-orange' },
+      { val: fmtSpeed(dlMax),             lbl: 'מהירות הורדה מקסימום',  cls: 'c-blue'   },
+      { val: fmtSpeed(dlSd),              lbl: 'סטיית תקן הורדה',       cls: 'c-purple' },
+    ] : []),
+    ...(dlTimeAvg !== null ? [
+      { val: fmtMs(dlTimeAvg),            lbl: 'זמן GET ממוצע',    cls: 'c-purple' },
+      { val: fmtMs(dlTimeMin),            lbl: 'זמן GET מינימום',   cls: 'c-green'  },
+      { val: fmtMs(dlTimeMax),            lbl: 'זמן GET מקסימום',   cls: 'c-red'    },
+      { val: fmtMs(dlTimeSd),             lbl: 'סטיית תקן GET',     cls: 'c-orange' },
     ] : []),
   ];
   $('stats-grid').innerHTML = cards.map(c =>
@@ -612,17 +634,20 @@ function showResults() {
       <td>${fmtTime(r.timestamp)}</td>
     </tr>`).join('');
 
-  renderCharts(ok, avg, med, dlOk);
+  renderCharts(ok, avg, med, dlOk, dlTiming);
 }
 
 // ── Charts ────────────────────────────────────────────────────────────────
 let chartDlLine = null, chartDlHist = null;
+let chartGetLine = null, chartGetHist = null;
 
-function renderCharts(ok, avg, med, dlOk) {
-  if (chartLine)   { chartLine.destroy();   chartLine   = null; }
-  if (chartHist)   { chartHist.destroy();   chartHist   = null; }
-  if (chartDlLine) { chartDlLine.destroy(); chartDlLine = null; }
-  if (chartDlHist) { chartDlHist.destroy(); chartDlHist = null; }
+function renderCharts(ok, avg, med, dlOk, dlTiming) {
+  if (chartLine)    { chartLine.destroy();    chartLine    = null; }
+  if (chartHist)    { chartHist.destroy();    chartHist    = null; }
+  if (chartDlLine)  { chartDlLine.destroy();  chartDlLine  = null; }
+  if (chartDlHist)  { chartDlHist.destroy();  chartDlHist  = null; }
+  if (chartGetLine) { chartGetLine.destroy(); chartGetLine = null; }
+  if (chartGetHist) { chartGetHist.destroy(); chartGetHist = null; }
   if (!ok.length) return;
 
   const labels  = ok.map(r => fmtTime(r.timestamp));
@@ -735,6 +760,55 @@ function renderCharts(ok, avg, med, dlOk) {
   } else {
     $('dl-charts').hidden = true;
   }
+
+  // ── GET timing charts (no-cors fallback) ──────────────────────────────────────────
+  if (dlTiming && dlTiming.length) {
+    $('get-charts').hidden = false;
+    const gtAvg    = mean(dlTiming.map(r => r.dl.elapsed));
+    const gtLabels = dlTiming.map(r => fmtTime(r.timestamp));
+    const gtMs     = dlTiming.map(r => +(r.dl.elapsed * 1000).toFixed(2));
+    const gtAvgMs  = gtAvg * 1000;
+
+    chartGetLine = new Chart($('chart-get-line'), {
+      type: 'line',
+      data: { labels: gtLabels, datasets: [
+        { label: 'זמן GET (ms)', data: gtMs,
+          borderColor: '#7c3aed', backgroundColor: 'rgba(124,58,237,.07)',
+          borderWidth: 1.5, fill: true, tension: 0.3,
+          pointRadius: gtMs.length > 80 ? 0 : 3, pointHoverRadius: 5 },
+        { label: `ממוצע ${fmtMs(gtAvg)}`,
+          data: Array(gtLabels.length).fill(+gtAvgMs.toFixed(2)),
+          borderColor: '#dc2626', borderWidth: 1.5, borderDash: [6,4],
+          pointRadius: 0, fill: false },
+      ]},
+      options: { responsive: true,
+        interaction: { mode: 'index', intersect: false },
+        plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } },
+        scales: {
+          x: { ticks: { maxTicksLimit: 8, font: { size: 10 } } },
+          y: { title: { display: true, text: 'ms' }, beginAtZero: true },
+        },
+      },
+    });
+
+    const gtBins = buildHistogram(gtMs, 20);
+    chartGetHist = new Chart($('chart-get-hist'), {
+      type: 'bar',
+      data: { labels: gtBins.labels, datasets: [{
+        label: 'כמות', data: gtBins.counts,
+        backgroundColor: 'rgba(124,58,237,.7)', borderColor: '#7c3aed',
+        borderWidth: 1, borderRadius: 3,
+      }]},
+      options: { responsive: true, plugins: { legend: { display: false } },
+        scales: {
+          x: { title: { display: true, text: 'ms' }, ticks: { font: { size: 10 } } },
+          y: { title: { display: true, text: 'כמות' }, beginAtZero: true, ticks: { precision: 0 } },
+        },
+      },
+    });
+  } else {
+    $('get-charts').hidden = true;
+  }
 }
 
 function buildHistogram(values, numBins) {
@@ -755,13 +829,16 @@ function buildHistogram(values, numBins) {
 function resetUI() {
   running = false;
   results = [];
-  $('prog-card').hidden  = true;
-  $('res-card').hidden   = true;
-  $('dl-charts').hidden  = true;
-  $('btn-start').hidden  = false;
-  $('btn-stop').hidden   = true;
-  if (chartDlLine) { chartDlLine.destroy(); chartDlLine = null; }
-  if (chartDlHist) { chartDlHist.destroy(); chartDlHist = null; }
+  $('prog-card').hidden   = true;
+  $('res-card').hidden    = true;
+  $('dl-charts').hidden   = true;
+  $('get-charts').hidden  = true;
+  $('btn-start').hidden   = false;
+  $('btn-stop').hidden    = true;
+  if (chartDlLine)  { chartDlLine.destroy();  chartDlLine  = null; }
+  if (chartDlHist)  { chartDlHist.destroy();  chartDlHist  = null; }
+  if (chartGetLine) { chartGetLine.destroy(); chartGetLine = null; }
+  if (chartGetHist) { chartGetHist.destroy(); chartGetHist = null; }
   clearErr();
 }
 function showErr(msg) { $('err-box').textContent = msg; $('err-box').hidden = false; }
