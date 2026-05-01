@@ -225,6 +225,14 @@
       <span id="hint" style="font-size:.82rem;color:var(--muted)"></span>
     </div>
 
+    <div id="proxy-status-box" style="margin-top:12px;padding:10px 14px;border-radius:7px;font-size:.83rem;border:1px solid var(--border);background:#f8fafc">
+      <span id="proxy-status">⏳ בודק פרוקסי מקומי...</span>
+      <span id="proxy-help" hidden style="color:var(--muted)"> —
+        להרצת פרוקסי: <code style="background:#e2e8f0;padding:1px 5px;border-radius:3px">python proxy.py</code>
+        (קובץ <code>proxy.py</code> בתיקיית הכלי)
+      </span>
+    </div>
+
     <div class="info-box">
       💡 הכנס את ה-URL של הקובץ בשרת (חייב להתחיל ב-<code>http://</code> או <code>https://</code>).
       הדפדפן ישלח בקשה לשרת וימדוד את זמן התגובה בכל ניסיון.
@@ -305,6 +313,34 @@ let running = false;
 let results  = [];
 let totalN   = 0;
 let chartLine = null, chartHist = null;
+
+// ── Local proxy ───────────────────────────────────────────────────────────
+const PROXY_URL = 'http://localhost:7654';
+let proxyOk = false;
+
+async function checkProxy() {
+  try {
+    const r = await fetch(PROXY_URL + '/http://example.com', {
+      signal: AbortSignal.timeout(1200), cache: 'no-store'
+    });
+    proxyOk = r.ok;
+  } catch (_) {
+    proxyOk = false;
+  }
+  const el = $('proxy-status');
+  const help = $('proxy-help');
+  if (proxyOk) {
+    el.textContent = '✓ פרוקסי מקומי פועל — הבדיקות יזהו קבצים שאינם קיימים (404) בדיוק מלא';
+    el.style.color = 'var(--success)';
+    $('proxy-status-box').style.background = '#f0fdf4';
+    $('proxy-status-box').style.borderColor = '#86efac';
+  } else {
+    el.textContent = '⚠️ פרוקסי מקומי לא פועל — לא ניתן לזהות 404 בשרת ללא CORS';
+    el.style.color = 'var(--warning)';
+    help.hidden = false;
+  }
+}
+checkProxy();
 
 // ── Format helpers ────────────────────────────────────────────────────────
 function fmtMs(sec) {
@@ -424,13 +460,33 @@ function randomIntervals(n, totalMs) {
 
 // ── Probe ─────────────────────────────────────────────────────────────────
 async function probe(url, timeoutSec) {
-  const sep  = url.includes('?') ? '&' : '?';
+  const sep = url.includes('?') ? '&' : '?';
+  const t0  = performance.now();
+
+  // Via local proxy — gets real HTTP status regardless of CORS
+  if (proxyOk) {
+    const ctrl = new AbortController();
+    const tid  = setTimeout(() => ctrl.abort(), timeoutSec * 1000);
+    try {
+      const resp = await fetch(PROXY_URL + '/' + url + sep + '_nc=' + Date.now(),
+        { cache: 'no-store', signal: ctrl.signal });
+      clearTimeout(tid);
+      const elapsed = (performance.now() - t0) / 1000;
+      const data    = await resp.json();
+      const status  = data.status;
+      const success = status >= 200 && status < 300 || status === 206;
+      return { success, elapsed, status, error: success ? null : `HTTP ${status}`, noCors: false };
+    } catch (e) {
+      clearTimeout(tid);
+      return { success: false, elapsed: (performance.now() - t0) / 1000,
+               error: e.name === 'AbortError' ? `Timeout (>${timeoutSec}s)` : e.message, status: null, noCors: false };
+    }
+  }
+
+  // Attempt 1: CORS GET with Range:bytes=0-0 — receives real HTTP status code
   const ctrl = new AbortController();
   const tid  = setTimeout(() => ctrl.abort(), timeoutSec * 1000);
   const bust = url + sep + '_nc=' + Date.now();
-  const t0   = performance.now();
-
-  // Attempt 1: CORS GET with Range:bytes=0-0 — receives real HTTP status code
   try {
     const resp = await fetch(bust, {
       method: 'GET', mode: 'cors', cache: 'no-store', signal: ctrl.signal,
